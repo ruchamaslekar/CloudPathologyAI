@@ -1,0 +1,113 @@
+# Python to Linux Web App on Azur
+# Build your Python project and deploy it to Azure as a Linux Web App.
+# Change python version to one that's appropriate for your application.
+# https://docs.microsoft.com/azure/devops/pipelines/languages/python
+
+trigger:
+  - master
+  - rucha/*
+  - ananya/*
+  - haebin/*
+
+variables:
+  azureServiceConnectionId: '0017b99f-5e52-446e-aedf-7c6aa795c6b4'  # Azure Resource Manager connection created during pipeline creation
+  webAppName: 'cp-ai'  # Web app name
+  vmImageName: 'ubuntu-latest'  # Agent VM image name
+  environmentName: 'cp-ai'  # Environment name
+  projectRoot: $(System.DefaultWorkingDirectory)  # Project root folder
+  pythonVersion: '3.12'  # Python version
+
+stages:
+- stage: Build
+  displayName: Build stage
+  jobs:
+  - job: BuildJob
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m venv antenv
+        source antenv/bin/activate
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      workingDirectory: $(projectRoot)
+      displayName: "Install requirements"
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive files'
+      inputs:
+        rootFolderOrFile: '$(projectRoot)'
+        includeRootFolder: false
+        archiveType: zip
+        archiveFile: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+        replaceExistingArchive: true
+
+    - upload: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+      displayName: 'Upload package'
+      artifact: drop
+
+- stage: Test
+  displayName: Test stage
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - job: TestJob
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python version'
+
+    - script: |
+        python3 -m venv env  # Create virtual environment
+        export OPENAI_API_KEY=$(OPENAI_API_KEY)
+        source env/bin/activate
+        pip install --upgrade pip         
+        pip install -r requirements.txt 
+        pytest --cov=. --cov-report=xml --cov-fail-under=80 --junitxml=results.xml
+      workingDirectory: $(projectRoot)
+      displayName: 'Run tests and coverage'
+
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFiles: 'results.xml'
+        testRunTitle: 'Test Results'
+
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(System.DefaultWorkingDirectory)/coverage.xml'
+        reportDirectory: '$(System.DefaultWorkingDirectory)/'
+        failIfCoverageEmpty: true
+
+- stage: Deploy
+  displayName: 'Deploy Web App'
+  dependsOn: Test
+  condition: succeeded()
+  jobs:
+  - deployment: DeploymentJob
+    pool:
+      vmImage: $(vmImageName)
+    environment: $(environmentName)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python version'
+
+          - task: AzureWebApp@1
+            displayName: 'Deploy Azure Web App : cp-ai'
+            inputs:
+              azureSubscription: $(azureServiceConnectionId)
+              appName: $(webAppName)
+              package: $(Pipeline.Workspace)/drop/$(Build.BuildId).zip
